@@ -36,6 +36,9 @@ export default function Home() {
   const [joinActive, setJoinActive] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [likedIds, setLikedIds] = useState([]); // Track user's client-side likes local to session
+  const [username, setUsername] = useState("");
+  const [usernameInput, setUsernameInput] = useState("");
+  const [pendingAction, setPendingAction] = useState(null);
   const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
@@ -43,6 +46,8 @@ export default function Home() {
     if (stored) {
       setSessionCode(stored.sessionCode ?? null);
       setJoinedCode(stored.joinedCode ?? null);
+      setUsername(stored.username ?? "");
+      setUsernameInput(stored.username ?? "");
     }
     setIsMounted(true);
   }, []);
@@ -50,16 +55,17 @@ export default function Home() {
   const inSession = joinedCode !== null;
   const canShare = inSession && draft.trim().length > 0;
   const remaining = MAX_CHARS - draft.length;
+  const usernameReady = username.trim().length > 0;
 
   // Persist code structures to localStorage for hot-reloads
   useEffect(() => {
     if (!isMounted) return;
 
     try {
-      const state = { sessionCode, joinedCode };
+      const state = { sessionCode, joinedCode, username };
       window.localStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(state));
     } catch {}
-  }, [isMounted, sessionCode, joinedCode]);
+  }, [isMounted, sessionCode, joinedCode, username]);
 
   // Fetch initial thoughts and subscribe to real-time changes
   useEffect(() => {
@@ -77,7 +83,12 @@ export default function Home() {
           .order("created_at", { ascending: false });
 
         if (!error && data) {
-          setThoughts(data);
+          setThoughts(
+            data.map((item) => ({
+              ...item,
+              author: item.author || username || "the trip mind",
+            }))
+          );
         }
       } catch (err) {
         console.warn("Supabase fetch thoughts failed:", err);
@@ -102,7 +113,13 @@ export default function Home() {
             setThoughts((current) => {
               const exists = current.some((t) => t.id === payload.new.id);
               if (exists) return current;
-              return [payload.new, ...current];
+              return [
+                {
+                  ...payload.new,
+                  author: payload.new.author || username || "the trip mind",
+                },
+                ...current,
+              ];
             });
           } else if (payload.eventType === "UPDATE") {
             setThoughts((current) =>
@@ -119,6 +136,14 @@ export default function Home() {
   }, [joinedCode]);
 
   const handleStartTrip = async () => {
+    const cleanedName = username.trim();
+    if (!cleanedName) {
+      setPendingAction("start");
+      setUsernameInput("");
+      setStatusMessage("");
+      return;
+    }
+
     const code = generateTripCode();
     setSessionCode(code);
     setJoinedCode(code);
@@ -151,6 +176,14 @@ export default function Home() {
   };
 
   const handleJoinTrip = async () => {
+    const cleanedName = username.trim();
+    if (!cleanedName) {
+      setPendingAction("join");
+      setJoinInput("");
+      setStatusMessage("");
+      return;
+    }
+
     const normalized = joinInput.trim();
     if (!/^[0-9]{4}$/.test(normalized)) {
       setStatusMessage("Enter a valid 4-digit trip code.");
@@ -195,16 +228,16 @@ export default function Home() {
     const currentDraft = draft.trim();
     setDraft(""); // Reset text field smoothly immediately on submit
 
+    const thoughtPayload = {
+      id: Date.now(),
+      text_content: currentDraft,
+      created_at: new Date().toISOString(),
+      likes: 0,
+      author: username || "Guest",
+    };
+
     if (!supabase) {
-      setThoughts((current) => [
-        {
-          id: Date.now(),
-          text_content: currentDraft,
-          created_at: new Date().toISOString(),
-          likes: 0,
-        },
-        ...current,
-      ]);
+      setThoughts((current) => [thoughtPayload, ...current]);
       setStatusMessage("Thought saved locally because cloud sync is unavailable.");
       return;
     }
@@ -219,29 +252,14 @@ export default function Home() {
       ]);
 
       if (error) {
+        console.warn("Supabase insert thought failed:", error.message || error);
         setStatusMessage("Couldn't upload thought. Please check connection.");
-        setThoughts((current) => [
-          {
-            id: Date.now(),
-            text_content: currentDraft,
-            created_at: new Date().toISOString(),
-            likes: 0,
-          },
-          ...current,
-        ]);
+        setThoughts((current) => [thoughtPayload, ...current]);
       }
     } catch (err) {
       console.warn("Supabase share thought exception:", err);
       setStatusMessage("Couldn't upload thought. Please check connection.");
-      setThoughts((current) => [
-        {
-          id: Date.now(),
-          text_content: currentDraft,
-          created_at: new Date().toISOString(),
-          likes: 0,
-        },
-        ...current,
-      ]);
+      setThoughts((current) => [thoughtPayload, ...current]);
     }
   };
 
@@ -279,8 +297,71 @@ export default function Home() {
     window.localStorage.removeItem(TRIP_STORAGE_KEY);
   };
 
+  const submitUsername = () => {
+    const trimmed = usernameInput.trim();
+    if (!trimmed) {
+      setStatusMessage("Who are you tonight? Enter a name before continuing.");
+      return;
+    }
+
+    setUsername(trimmed);
+    setUsernameInput(trimmed);
+
+    if (pendingAction === "start") {
+      setPendingAction(null);
+      handleStartTrip();
+      return;
+    }
+
+    if (pendingAction === "join") {
+      setPendingAction(null);
+      setJoinActive(true);
+      setStatusMessage("");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
+      {pendingAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-[2rem] border border-emerald-500/20 bg-slate-900 p-6 shadow-2xl shadow-slate-950/60">
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-300/70">Enter your vibe</p>
+            <h2 className="mt-3 text-2xl font-semibold text-white">Who are you tonight?</h2>
+            <p className="mt-2 text-sm text-slate-400">
+              Pick a nickname so your trip friends know who&apos;s posting.
+            </p>
+            <input
+              value={usernameInput}
+              onChange={(event) => setUsernameInput(event.target.value)}
+              placeholder="Your nickname"
+              className="mt-5 w-full rounded-3xl border border-white/10 bg-slate-950/95 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-emerald-400/80 focus:ring-2 focus:ring-emerald-400/20"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  submitUsername();
+                }
+              }}
+              autoFocus
+            />
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setPendingAction(null)}
+                className="flex-1 rounded-3xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitUsername}
+                className="flex-1 rounded-3xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-500/20 transition hover:scale-[1.01]"
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="mx-auto flex min-h-screen w-full max-w-md flex-col px-4 py-6 sm:px-6 lg:px-8">
         <header className="mb-6 rounded-[2rem] border border-emerald-500/10 bg-slate-950/85 p-6 shadow-[0_28px_70px_-45px_rgba(16,185,129,0.65)] backdrop-blur-xl">
           <div className="mb-4 flex items-center justify-between gap-4">
@@ -315,7 +396,11 @@ export default function Home() {
           <div className="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
-              onClick={handleStartTrip}
+              onClick={() => {
+                setPendingAction("start");
+                setUsernameInput(username);
+                setStatusMessage("");
+              }}
               className="inline-flex items-center justify-center rounded-3xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-500/20 transition hover:scale-[1.01]"
             >
               Start Trip
@@ -323,7 +408,8 @@ export default function Home() {
             <button
               type="button"
               onClick={() => {
-                setJoinActive((current) => !current);
+                setPendingAction("join");
+                setUsernameInput(username);
                 setStatusMessage("");
               }}
               className="inline-flex items-center justify-center rounded-3xl border border-emerald-500/20 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-slate-900"
@@ -445,7 +531,7 @@ export default function Home() {
                         <article key={thought.id} className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-slate-900/95 p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-0.5 hover:shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)]">
                           <div className="mb-4 flex items-start justify-between gap-3">
                             <div>
-                              <p className="text-sm font-semibold text-slate-200">the trip mind</p>
+                              <p className="text-sm font-semibold text-slate-200">{thought.author || username || "the trip mind"}</p>
                               <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{formatRelativeTime(thought.created_at)}</p>
                             </div>
                             <span className="rounded-full bg-slate-800/80 px-3 py-1 text-xs text-slate-400 ring-1 ring-white/5">
