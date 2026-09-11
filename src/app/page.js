@@ -1,18 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
 
 const MAX_CHARS = 280;
 const TRIP_STORAGE_KEY = "hot-thoughts-trip";
 
 const generateTripCode = () => String(Math.floor(1000 + Math.random() * 9000));
 
-function formatRelativeTime(timestamp) {
+function formatRelativeTime(dateString) {
+  const timestamp = new Date(dateString).getTime();
   const delta = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
   if (delta < 60) return `${delta}s ago`;
   if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
   if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
   return `${Math.floor(delta / 86400)}d ago`;
+}
+
+function readStoredTrip() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(TRIP_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
 }
 
 export default function Home() {
@@ -23,118 +35,248 @@ export default function Home() {
   const [joinInput, setJoinInput] = useState("");
   const [joinActive, setJoinActive] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
+  const [likedIds, setLikedIds] = useState([]); // Track user's client-side likes local to session
+  const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(TRIP_STORAGE_KEY);
+    const stored = readStoredTrip();
     if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        if (parsed?.sessionCode) setSessionCode(parsed.sessionCode);
-        if (parsed?.joinedCode) setJoinedCode(parsed.joinedCode);
-        if (Array.isArray(parsed?.thoughts)) setThoughts(parsed.thoughts);
-      } catch {
-        window.localStorage.removeItem(TRIP_STORAGE_KEY);
-      }
+      setSessionCode(stored.sessionCode ?? null);
+      setJoinedCode(stored.joinedCode ?? null);
     }
+    setIsMounted(true);
   }, []);
 
   const inSession = joinedCode !== null;
   const canShare = inSession && draft.trim().length > 0;
   const remaining = MAX_CHARS - draft.length;
 
-  const saveTripState = (tripState) => {
-    window.localStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(tripState));
-  };
+  // Persist code structures to localStorage for hot-reloads
+  useEffect(() => {
+    if (!isMounted) return;
 
-  const handleStartTrip = () => {
+    try {
+      const state = { sessionCode, joinedCode };
+      window.localStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(state));
+    } catch {}
+  }, [isMounted, sessionCode, joinedCode]);
+
+  // Fetch initial thoughts and subscribe to real-time changes
+  useEffect(() => {
+    if (!joinedCode || !supabase) {
+      return;
+    }
+
+    // 1. Initial Fetch (Latest thoughts first)
+    const fetchThoughts = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("thoughts")
+          .select("*")
+          .eq("party_code", joinedCode)
+          .order("created_at", { ascending: false });
+
+        if (!error && data) {
+          setThoughts(data);
+        }
+      } catch (err) {
+        console.warn("Supabase fetch thoughts failed:", err);
+      }
+    };
+
+    fetchThoughts();
+
+    // 2. Real-time Subscription - List tracking rule enforcement
+    const channel = supabase
+      .channel(`realtime-thoughts-${joinedCode}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "thoughts",
+          filter: `party_code=eq.${joinedCode}`,
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setThoughts((current) => {
+              const exists = current.some((t) => t.id === payload.new.id);
+              if (exists) return current;
+              return [payload.new, ...current];
+            });
+          } else if (payload.eventType === "UPDATE") {
+            setThoughts((current) =>
+              current.map((t) => (t.id === payload.new.id ? payload.new : t))
+            );
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [joinedCode]);
+
+  const handleStartTrip = async () => {
     const code = generateTripCode();
     setSessionCode(code);
     setJoinedCode(code);
-    setStatusMessage(`Trip started. Share code ${code} to bring others into this session.`);
     setJoinActive(false);
     setJoinInput("");
-    saveTripState({ sessionCode: code, joinedCode: code, thoughts });
+
+    let created = false;
+
+    if (supabase) {
+      try {
+        const { error } = await supabase
+          .from("parties")
+          .insert([{ party_code: code }]);
+
+        if (!error) {
+          created = true;
+        } else {
+          console.warn("Supabase start trip failed:", error.message);
+        }
+      } catch (err) {
+        console.warn("Supabase start trip exception:", err);
+      }
+    }
+
+    setStatusMessage(
+      created
+        ? `Trip started. Share code ${code} to bring others into this session.`
+        : `Trip started locally with code ${code}. Cloud sync is unavailable.`
+    );
   };
 
-  const handleJoinTrip = () => {
+  const handleJoinTrip = async () => {
     const normalized = joinInput.trim();
     if (!/^[0-9]{4}$/.test(normalized)) {
       setStatusMessage("Enter a valid 4-digit trip code.");
       return;
     }
-    const activeCode = sessionCode || (() => {
-      const stored = window.localStorage.getItem(TRIP_STORAGE_KEY);
-      if (!stored) return null;
-      try {
-        return JSON.parse(stored)?.sessionCode || null;
-      } catch {
-        return null;
-      }
-    })();
 
-    if (!activeCode) {
-      setStatusMessage("No active trip is available yet. Ask your friend to start one.");
+    let foundRemote = false;
+    if (supabase) {
+      try {
+        const { data, error } = await supabase
+          .from("parties")
+          .select("*")
+          .eq("party_code", normalized)
+          .maybeSingle();
+
+        if (data && !error) {
+          foundRemote = true;
+        }
+      } catch (err) {
+        console.warn("Supabase join trip exception:", err);
+      }
+    }
+
+    const localMatch = sessionCode === normalized;
+    if (!foundRemote && !localMatch) {
+      setStatusMessage(
+        "That code doesn't match an active trip. If the trip was started locally, use the same browser session."
+      );
       return;
     }
-    if (normalized !== activeCode) {
-      setStatusMessage("That code doesn't match the active trip.");
-      return;
-    }
+
     setJoinedCode(normalized);
+    setSessionCode(normalized);
     setStatusMessage(`Joined trip ${normalized}. You can now share notes with this session.`);
     setJoinActive(false);
     setJoinInput("");
-    saveTripState({ sessionCode: activeCode, joinedCode: normalized, thoughts });
   };
 
-  const handleShare = () => {
+  const handleShare = async () => {
     if (!canShare || draft.length > MAX_CHARS) return;
 
-    const nextThought = {
-      id: Date.now(),
-      text: draft.trim(),
-      createdAt: Date.now(),
-      likes: 0,
-      liked: false,
-    };
+    const currentDraft = draft.trim();
+    setDraft(""); // Reset text field smoothly immediately on submit
 
-    setThoughts((current) => {
-      const next = [nextThought, ...current];
-      saveTripState({ sessionCode, joinedCode, thoughts: next });
-      return next;
-    });
-    setDraft("");
+    if (!supabase) {
+      setThoughts((current) => [
+        {
+          id: Date.now(),
+          text_content: currentDraft,
+          created_at: new Date().toISOString(),
+          likes: 0,
+        },
+        ...current,
+      ]);
+      setStatusMessage("Thought saved locally because cloud sync is unavailable.");
+      return;
+    }
+
+    try {
+      const { error } = await supabase.from("thoughts").insert([
+        {
+          party_code: joinedCode,
+          text_content: currentDraft,
+          likes: 0,
+        },
+      ]);
+
+      if (error) {
+        setStatusMessage("Couldn't upload thought. Please check connection.");
+        setThoughts((current) => [
+          {
+            id: Date.now(),
+            text_content: currentDraft,
+            created_at: new Date().toISOString(),
+            likes: 0,
+          },
+          ...current,
+        ]);
+      }
+    } catch (err) {
+      console.warn("Supabase share thought exception:", err);
+      setStatusMessage("Couldn't upload thought. Please check connection.");
+      setThoughts((current) => [
+        {
+          id: Date.now(),
+          text_content: currentDraft,
+          created_at: new Date().toISOString(),
+          likes: 0,
+        },
+        ...current,
+      ]);
+    }
   };
 
-  const toggleVibe = (id) => {
-    setThoughts((current) =>
-      current.map((thought) => {
-        if (thought.id !== id) return thought;
-        const liked = !thought.liked;
-        return {
-          ...thought,
-          liked,
-          likes: thought.likes + (liked ? 1 : -1),
-        };
-      })
+  const toggleVibe = async (id, currentLikes) => {
+    const isLiked = likedIds.includes(id);
+    const nextLikes = currentLikes + (isLiked ? -1 : 1);
+
+    setLikedIds((prev) =>
+      isLiked ? prev.filter((item) => item !== id) : [...prev, id]
     );
+
+    setThoughts((current) =>
+      current.map((thought) =>
+        thought.id === id ? { ...thought, likes: nextLikes } : thought
+      )
+    );
+
+    if (!supabase) return;
+
+    try {
+      await supabase
+        .from("thoughts")
+        .update({ likes: nextLikes })
+        .eq("id", id);
+    } catch (err) {
+      console.warn("Supabase toggle vibe exception:", err);
+    }
   };
 
   const handleLeave = () => {
     setJoinedCode(null);
+    setSessionCode(null);
+    setThoughts([]);
     setStatusMessage("You left the trip. Start or join a new one to continue.");
-    const stored = window.localStorage.getItem(TRIP_STORAGE_KEY);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored);
-        window.localStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify({
-          ...parsed,
-          joinedCode: null,
-        }));
-      } catch {
-        window.localStorage.removeItem(TRIP_STORAGE_KEY);
-      }
-    }
+    window.localStorage.removeItem(TRIP_STORAGE_KEY);
   };
 
   return (
@@ -297,42 +439,48 @@ export default function Home() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {thoughts.map((thought) => (
-                      <article key={thought.id} className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-slate-900/95 p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-0.5 hover:shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)]">
-                        <div className="mb-4 flex items-start justify-between gap-3">
-                          <div>
-                            <p className="text-sm font-semibold text-slate-200">trip mind</p>
-                            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{formatRelativeTime(thought.createdAt)}</p>
+                    {thoughts.map((thought) => {
+                      const isVibed = likedIds.includes(thought.id);
+                      return (
+                        <article key={thought.id} className="overflow-hidden rounded-[1.75rem] border border-white/10 bg-slate-900/95 p-5 shadow-xl shadow-slate-950/20 transition hover:-translate-y-0.5 hover:shadow-[0_18px_65px_-35px_rgba(16,185,129,0.45)]">
+                          <div className="mb-4 flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-semibold text-slate-200">the trip mind</p>
+                              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{formatRelativeTime(thought.created_at)}</p>
+                            </div>
+                            <span className="rounded-full bg-slate-800/80 px-3 py-1 text-xs text-slate-400 ring-1 ring-white/5">
+                              {thought.likes} vibes
+                            </span>
                           </div>
-                          <span className="rounded-full bg-slate-800/80 px-3 py-1 text-xs text-slate-400 ring-1 ring-white/5">
-                            {thought.likes} vibes
-                          </span>
-                        </div>
-                        <p className="mb-5 whitespace-pre-wrap text-base leading-7 text-slate-100">
-                          {thought.text}
-                        </p>
-                        <div className="flex flex-wrap gap-3 text-sm">
-                          <button
-                            type="button"
-                            onClick={() => toggleVibe(thought.id)}
-                            className={`inline-flex items-center gap-2 rounded-full px-4 py-2 transition ${thought.liked ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/25" : "bg-white/5 text-slate-300 hover:bg-white/10"}`}
-                          >
-                            <span>{thought.liked ? "💚" : "✨"}</span>
-                            {thought.liked ? "Vibed" : "Vibe"}
-                          </button>
-                          <button
-                            type="button"
-                            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-slate-300 transition hover:border-emerald-400/30 hover:bg-emerald-500/10"
-                            onClick={() => {
-                              /* placeholder for share action */
-                            }}
-                          >
-                            <span>🔗</span>
-                            Share
-                          </button>
-                        </div>
-                      </article>
-                    ))}
+                          <p className="mb-5 whitespace-pre-wrap text-base leading-7 text-slate-100">
+                            {thought.text_content}
+                          </p>
+                          <div className="flex flex-wrap gap-3 text-sm">
+                            <button
+                              type="button"
+                              onClick={() => toggleVibe(thought.id, thought.likes)}
+                              className={`inline-flex items-center gap-2 rounded-full px-4 py-2 transition ${isVibed ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/25" : "bg-white/5 text-slate-300 hover:bg-white/10"}`}
+                            >
+                              <span>{isVibed ? "💚" : "✨"}</span>
+                              {isVibed ? "Vibed" : "Vibe"}
+                            </button>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-slate-300 transition hover:border-emerald-400/30 hover:bg-emerald-500/10"
+                              onClick={() => {
+                                if (typeof window !== "undefined") {
+                                  navigator.clipboard.writeText(thought.text_content);
+                                  alert("Copied thought text to clipboard!");
+                                }
+                              }}
+                            >
+                              <span>🔗</span>
+                              Copy
+                            </button>
+                          </div>
+                        </article>
+                      );
+                    })}
                   </div>
                 )}
               </div>
