@@ -70,6 +70,7 @@ export default function Home() {
   const [alterEgoInput, setAlterEgoInput] = useState("");
   const [pendingAction, setPendingAction] = useState(null);
   const [pendingAlterEgo, setPendingAlterEgo] = useState(false);
+  const [hasSeenAlterEgoPrompt, setHasSeenAlterEgoPrompt] = useState(false);
   const [userId, setUserId] = useState(null);
   const [profile, setProfile] = useState(null);
   const [isMounted, setIsMounted] = useState(false);
@@ -553,6 +554,14 @@ export default function Home() {
   };
 
   useEffect(() => {
+    if (!isAuthenticated) return;
+    if (!alterEgo && !hasSeenAlterEgoPrompt) {
+      setHasSeenAlterEgoPrompt(true);
+      setPendingAlterEgo(true);
+    }
+  }, [isAuthenticated, alterEgo, hasSeenAlterEgoPrompt]);
+
+  useEffect(() => {
     if (authRetrySeconds <= 0) return;
 
     const timer = setInterval(() => {
@@ -951,9 +960,8 @@ export default function Home() {
         <header className="mb-6 rounded-[2rem] border border-emerald-500/10 bg-slate-950/85 p-6 shadow-[0_28px_70px_-45px_rgba(16,185,129,0.65)] backdrop-blur-xl">
           <div className="mb-4 flex items-center justify-between gap-4">
             <div>
-              <p className="text-sm uppercase tracking-[0.35em] text-emerald-300/70">high-on-thoughts</p>
-              <h1 className="mt-3 text-3xl font-semibold tracking-tight text-white">
-                Neon Night Trips
+              <h1 className="text-3xl font-semibold tracking-tight text-white">
+                High on Thoughts
               </h1>
             </div>
             <div className="flex h-12 w-12 items-center justify-center rounded-3xl bg-emerald-500/10 ring-1 ring-emerald-400/20">
@@ -1000,83 +1008,85 @@ export default function Home() {
           </div>
         </div>
 
-        <section className="mb-6 rounded-[2rem] border border-emerald-500/10 bg-slate-900/90 p-5 shadow-xl shadow-slate-950/25 backdrop-blur-sm">
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">Trip controls</p>
-              <p className="mt-2 text-sm leading-6 text-slate-300">
-                Start a trip to generate a shareable code, or join a friend&apos;s trip to connect to the same note feed.
-              </p>
-            </div>
-            <div className="rounded-3xl bg-white/5 px-4 py-3 text-sm text-emerald-200 ring-1 ring-emerald-300/10">
-              Active: {joinedCode ? "Connected" : "Waiting"}
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={() => {
-                setPendingAction("start");
-                setAlterEgoInput(alterEgo || username);
-                setStatusMessage("");
-              }}
-              className="inline-flex items-center justify-center rounded-3xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-500/20 transition hover:scale-[1.01]"
-            >
-              Start Trip
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setPendingAction("join");
-                setAlterEgoInput(alterEgo || username);
-                setStatusMessage("");
-              }}
-              className="inline-flex items-center justify-center rounded-3xl border border-emerald-500/20 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-slate-900"
-            >
-              Join Trip
-            </button>
-          </div>
-
-          {joinActive && (
-            <div className="mt-4 rounded-3xl border border-emerald-500/20 bg-slate-950/90 p-4 shadow-inner shadow-emerald-500/5">
-              <label htmlFor="joinCode" className="mb-2 block text-sm font-medium text-slate-300">
-                Enter 4-digit trip code
-              </label>
-              <div className="flex gap-3">
-                <input
-                  id="joinCode"
-                  value={joinInput}
-                  onChange={(event) => setJoinInput(event.target.value)}
-                  placeholder="1234"
-                  className="w-full rounded-3xl border border-white/10 bg-slate-950/95 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-emerald-400/80 focus:ring-2 focus:ring-emerald-400/20"
-                />
-                <button
-                  type="button"
-                  onClick={handleJoinTrip}
-                  className="inline-flex items-center justify-center rounded-3xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
-                >
-                  Connect
-                </button>
+        {!joinedCode ? (
+          <section className="mb-6 rounded-[2rem] border border-emerald-500/10 bg-slate-900/90 p-5 shadow-xl shadow-slate-950/25 backdrop-blur-sm">
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-400">Trip controls</p>
+                <p className="mt-2 text-sm leading-6 text-slate-300">
+                  Start a trip to generate a shareable code, or join a friend&apos;s trip to connect to the same note feed.
+                </p>
+              </div>
+              <div className="rounded-3xl bg-white/5 px-4 py-3 text-sm text-emerald-200 ring-1 ring-emerald-300/10">
+                Active: Waiting
               </div>
             </div>
-          )}
 
-          {statusMessage && (
-            <p className="mt-4 text-sm text-emerald-300">{statusMessage}</p>
-          )}
-
-          {sessionCode && (
-            <div className="mt-5 rounded-[1.75rem] border border-emerald-500/15 bg-slate-950/70 px-4 py-4 text-sm text-slate-300 ring-1 ring-emerald-500/10">
-              <p className="font-semibold text-slate-100">Current trip code</p>
-              <p className="mt-1 text-2xl tracking-[0.35em] text-emerald-300">{sessionCode}</p>
-              <p className="mt-2 text-xs text-slate-500">Share this code with friends to join the same trip.</p>
-              <p className="mt-3 text-sm text-emerald-200">
-                [{tripParticipantCount}] {tripParticipantCount === 1 ? "person is" : "people are"} tripping with you
-              </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingAction("start");
+                  setAlterEgoInput(alterEgo || username);
+                  setStatusMessage("");
+                }}
+                className="inline-flex items-center justify-center rounded-3xl bg-gradient-to-r from-emerald-400 to-cyan-400 px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-emerald-500/20 transition hover:scale-[1.01]"
+              >
+                Start Trip
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingAction("join");
+                  setAlterEgoInput(alterEgo || username);
+                  setStatusMessage("");
+                }}
+                className="inline-flex items-center justify-center rounded-3xl border border-emerald-500/20 bg-slate-950/80 px-4 py-3 text-sm font-semibold text-emerald-300 transition hover:bg-slate-900"
+              >
+                Join Trip
+              </button>
             </div>
-          )}
-        </section>
+
+            {joinActive && (
+              <div className="mt-4 rounded-3xl border border-emerald-500/20 bg-slate-950/90 p-4 shadow-inner shadow-emerald-500/5">
+                <label htmlFor="joinCode" className="mb-2 block text-sm font-medium text-slate-300">
+                  Enter 4-digit trip code
+                </label>
+                <div className="flex gap-3">
+                  <input
+                    id="joinCode"
+                    value={joinInput}
+                    onChange={(event) => setJoinInput(event.target.value)}
+                    placeholder="1234"
+                    className="w-full rounded-3xl border border-white/10 bg-slate-950/95 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-emerald-400/80 focus:ring-2 focus:ring-emerald-400/20"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleJoinTrip}
+                    className="inline-flex items-center justify-center rounded-3xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 transition hover:bg-emerald-400"
+                  >
+                    Connect
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {statusMessage && (
+              <p className="mt-4 text-sm text-emerald-300">{statusMessage}</p>
+            )}
+
+            {sessionCode && (
+              <div className="mt-5 rounded-[1.75rem] border border-emerald-500/15 bg-slate-950/70 px-4 py-4 text-sm text-slate-300 ring-1 ring-emerald-500/10">
+                <p className="font-semibold text-slate-100">Current trip code</p>
+                <p className="mt-1 text-2xl tracking-[0.35em] text-emerald-300">{sessionCode}</p>
+                <p className="mt-2 text-xs text-slate-500">Share this code with friends to join the same trip.</p>
+                <p className="mt-3 text-sm text-emerald-200">
+                  [{tripParticipantCount}] {tripParticipantCount === 1 ? "person is" : "people are"} tripping with you
+                </p>
+              </div>
+            )}
+          </section>
+        ) : null}
 
         {inSession ? (
           <>
